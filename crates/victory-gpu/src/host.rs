@@ -317,6 +317,10 @@ pub(crate) struct HostList {
     /// Upload memory for data the list's draws make (expanded vertices),
     /// reused after a reset.
     scratch: Mutex<Scratch>,
+    /// GPU-copyable memory that indirect arguments and counts are copied
+    /// into before `ExecuteIndirect`, reused after a reset (see
+    /// [`HostList::indirect_copy`]).
+    indirect: Mutex<IndirectArena>,
     /// Host texture states the list assumes, by host copy: at its start and
     /// at its end. Lists are recorded on many threads and run in submission
     /// order, so the transitions from a texture's real state are made at
@@ -403,6 +407,18 @@ struct Scratch {
 unsafe impl Send for Scratch {}
 
 const SCRATCH_CHUNK: u64 = 4 << 20;
+
+/// List-owned buffers indirect arguments are copied into, with the state
+/// each chunk is left in (recorded order is execution order within a list,
+/// and a chunk keeps its last state across a reset).
+#[derive(Default)]
+struct IndirectArena {
+    chunks: Vec<(ID3D12Resource, D3D12_RESOURCE_STATES)>,
+    current: usize,
+    used: u64,
+}
+
+const INDIRECT_CHUNK: u64 = 1 << 20;
 
 /// One piece of submission-time work, in recorded order.
 enum Step {
@@ -516,6 +532,7 @@ impl Host {
                 list,
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
+                indirect: Mutex::default(),
                 states: Mutex::default(),
                 buffer_states: Mutex::default(),
                 prelude: (prelude_allocator, prelude),
@@ -939,6 +956,10 @@ impl HostList {
             let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
             (scratch.current, scratch.used) = (0, 0);
         }
+        {
+            let mut indirect = self.indirect.lock().unwrap_or_else(|e| e.into_inner());
+            (indirect.current, indirect.used) = (0, 0);
+        }
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
@@ -1210,6 +1231,61 @@ impl HostList {
         let at = s.used;
         s.used += len;
         Some((gpu + at, (data + at as usize) as *mut u8))
+    }
+
+    /// Records a copy of `len` bytes at `offset` in `source` (a buffer in a
+    /// state copies may read) into list-owned memory, left as indirect
+    /// arguments: the buffer and offset `ExecuteIndirect` reads them at.
+    ///
+    /// The console reads indirect arguments from memory its shaders also
+    /// write; a host buffer cannot be in the indirect-argument and
+    /// unordered-access states at once, and a title buffer holding the
+    /// arguments of a draw whose shaders write the same buffer (one large
+    /// pool) would be read as arguments in the wrong state (the debug layer
+    /// reports it; NVIDIA may read garbage or hang). A copy taken right
+    /// after the clamp leaves the title buffer to the draw's own shaders.
+    pub(crate) fn indirect_copy(
+        &self,
+        source: &ID3D12Resource,
+        offset: u64,
+        len: u64,
+    ) -> Option<(ID3D12Resource, u64)> {
+        let host = host()?;
+        let len = len.max(4).next_multiple_of(16);
+        if len > INDIRECT_CHUNK {
+            return None;
+        }
+        let mut a = self.indirect.lock().unwrap_or_else(|e| e.into_inner());
+        if a.used + len > INDIRECT_CHUNK {
+            (a.current, a.used) = (a.current + 1, 0);
+        }
+        if a.current == a.chunks.len() {
+            let (buffer, _) = host.shared_buffer(INDIRECT_CHUNK)?;
+            name(&buffer, || "list indirect arguments".into());
+            a.chunks.push((buffer, D3D12_RESOURCE_STATE_COMMON));
+        }
+        let at = a.used;
+        a.used += len;
+        let i = a.current;
+        let (buffer, state) = a.chunks[i].clone();
+        // SAFETY: an open list; live buffers; `at + len` lies in the chunk.
+        unsafe {
+            if state != D3D12_RESOURCE_STATE_COPY_DEST {
+                self.list
+                    .ResourceBarrier(&[transition(&buffer, state, D3D12_RESOURCE_STATE_COPY_DEST)]);
+            }
+            self.list.CopyBufferRegion(&buffer, at, source, offset, len.min(
+                // SAFETY: a live buffer.
+                source.GetDesc().Width.saturating_sub(offset),
+            ));
+            self.list.ResourceBarrier(&[transition(
+                &buffer,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+        }
+        a.chunks[i].1 = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        Some((buffer, at))
     }
 
     /// The host address of the list's indirect-work budget, zeroed at each

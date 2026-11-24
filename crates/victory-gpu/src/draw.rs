@@ -993,6 +993,24 @@ impl State {
             why("not bounded (no clamp, or arguments not 4-byte aligned)");
             return false;
         }
+        // The clamped arguments (and count), copied while the title buffer
+        // can still be read: binding the draw may move that buffer to
+        // unordered access for its own shaders (see `HostList::indirect_copy`).
+        let Some((arg_buffer, arg_offset)) = list.indirect_copy(&args.buffer, args.offset(arguments), len)
+        else {
+            why("indirect arguments not copied");
+            return false;
+        };
+        let count = match &counter {
+            Some((s, at)) => match list.indirect_copy(&s.buffer, s.offset(*at), 4) {
+                Some(copy) => Some(copy),
+                None => {
+                    why("indirect count not copied");
+                    return false;
+                }
+            },
+            None => None,
+        };
         self.host_pipeline = 0;
         self.host_roots[1] = 0;
         let ran = match kind {
@@ -1026,10 +1044,10 @@ impl State {
             list.list.ExecuteIndirect(
                 &signature,
                 max,
-                &args.buffer,
-                args.offset(arguments),
-                counter.as_ref().map(|(s, _)| &s.buffer),
-                counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
+                &arg_buffer,
+                arg_offset,
+                count.as_ref().map(|(b, _)| b),
+                count.as_ref().map_or(0, |&(_, at)| at),
             )
         };
         crate::indirect::done(list, &args);
