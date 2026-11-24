@@ -4251,6 +4251,20 @@ impl<'a> Lower<'a> {
                     118,
                     &[a],
                 );
+                // In a pixel shader the console's whole-quad mode keeps helper
+                // lanes in EXEC, so a waterfall loop (readfirstlane, cmpx_eq,
+                // take the lanes out) serves them too; the host's wave
+                // operations leave them out, and once only helper lanes are
+                // left none of them matches the value read and each runs to the
+                // loop limit. A helper lane takes its own value: it matches in
+                // its first pass. Its results only feed derivatives.
+                let r = if self.x.native.stage == HwStage::Ps {
+                    let helper =
+                        self.s.op(c, "isHelperLane.i1", Attr::ReadOnly, self.s.t.i1, 221, &[]);
+                    self.s.m.select(c, helper, a, r)
+                } else {
+                    r
+                };
                 int(self, r)
             }
             _ => {
