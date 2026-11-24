@@ -32,9 +32,10 @@ pub(super) const MOUSE_BUTTONS: [u8; 5] = [0x01, 0x02, 0x04, 0x05, 0x06];
 const FULL_RATE: f64 = 2000.0;
 /// Title reads closer together than this see the same mouse stick.
 const MIN_TAKE_US: u64 = 2_000;
-/// The first read's time span, and the longest one (a title that paused).
+/// The first read's time span, and the longest one (a title that paused;
+/// Grand Theft Auto VI's world frames take 1-2 s here for now, measured).
 const FIRST_TAKE_US: u64 = 16_667;
-const MAX_TAKE_US: u64 = 250_000;
+const MAX_TAKE_US: u64 = 1_000_000;
 /// Counts past a full stick wait at most this long (seconds of full stick).
 const CARRY_S: f64 = 0.1;
 /// A pad stick past this takes its stick back from the keyboard and mouse.
@@ -938,6 +939,21 @@ mod tests {
         let p = c.take(60_000, None, &counts);
         assert!((p.right_y - 0.25).abs() < 1e-6 && p.right_x == 0.0);
         assert_eq!(c.take(70_000, None, &counts).right_y, 0.0);
+    }
+
+    #[test]
+    fn slow_frames_get_the_rate_over_their_whole_span() {
+        let mut c = controls();
+        let counts = Counts::default();
+        c.take(0, None, &counts);
+        // 1,000 counts over an 800 ms frame: half a stick, not saturated.
+        counts.add(1000, 0);
+        let p = c.take(800_000, None, &counts);
+        assert!((p.right_x - 0.625).abs() < 1e-6, "{}", p.right_x);
+        // Past the longest span the title counts as paused.
+        counts.add(1000, 0);
+        let p = c.take(3_800_000, None, &counts);
+        assert!((p.right_x - 0.5).abs() < 1e-6, "{}", p.right_x);
     }
 
     #[test]
