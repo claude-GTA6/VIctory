@@ -228,22 +228,43 @@ impl Bools {
     /// too large to finish.
     pub fn meet(&self, all: &[(Bool, bool)]) -> bool {
         let mut budget = MAX_MEET;
-        self.meet_in(all.to_vec(), &mut budget)
+        let mut dead = std::collections::HashSet::new();
+        self.meet_in(all.to_vec(), &mut budget, &mut dead)
     }
 
-    fn meet_in(&self, mut all: Vec<(Bool, bool)>, budget: &mut usize) -> bool {
+    /// [`Self::meet`] by case splits on the lowest variable. Sets of
+    /// conditions already found unsatisfiable are remembered (sorted, without
+    /// duplicates), so each distinct set is split once.
+    fn meet_in(
+        &self,
+        mut all: Vec<(Bool, bool)>,
+        budget: &mut usize,
+        dead: &mut std::collections::HashSet<Vec<(Bool, bool)>>,
+    ) -> bool {
         let fails = |&(b, holds): &(Bool, bool)| b == if holds { Bool::FALSE } else { Bool::TRUE };
         if all.iter().any(fails) {
             return false;
         }
         all.retain(|&(b, _)| b != Bool::FALSE && b != Bool::TRUE);
-        if all.is_empty() || *budget == 0 {
+        all.sort_unstable_by_key(|&(b, holds)| (b.0, holds));
+        all.dedup();
+        // The same condition required to hold and to fail.
+        if all.windows(2).any(|w| w[0].0 == w[1].0) {
+            return false;
+        }
+        if all.is_empty() {
+            return true;
+        }
+        if dead.contains(&all) {
+            return false;
+        }
+        if *budget == 0 {
             return true;
         }
         *budget -= 1;
         let top = |b: Bool| self.nodes[b.0 as usize].0;
         let v = all.iter().map(|&(b, _)| top(b)).min().expect("not empty");
-        [false, true].into_iter().any(|value| {
+        let sat = [false, true].into_iter().any(|value| {
             let next = all
                 .iter()
                 .map(|&(b, holds)| {
@@ -251,8 +272,12 @@ impl Bools {
                     (if value { hi } else { lo }, holds)
                 })
                 .collect();
-            self.meet_in(next, budget)
-        })
+            self.meet_in(next, budget, dead)
+        });
+        if !sat {
+            dead.insert(all);
+        }
+        sat
     }
 
     fn implies(&mut self, a: Bool, b: Bool) -> bool {
@@ -1106,6 +1131,32 @@ mod tests {
     fn build(words: &[u32], wave64: bool) -> Program {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         ir::build(&code, wave64, 256).unwrap()
+    }
+
+    /// A parity over 24 variables and its negation, as two separate
+    /// conditions: unsatisfiable, but a plain case split meets 2^24 paths and
+    /// once ran out of splits and answered "satisfiable" (a per-lane
+    /// descriptor join then took an edge no accessing lane takes).
+    #[test]
+    fn meet_sees_a_contradiction_deep_in_the_variables() {
+        let mut b = Bools::new();
+        let x: Vec<Bool> = (0..24)
+            .map(|i| b.atom(Atom::Uniform(ir::Value(i)), 0))
+            .collect();
+        let mut parity = Bool::FALSE;
+        for &v in &x {
+            parity = b.xor(parity, v);
+        }
+        let not_parity = b.not(parity);
+        assert!(!b.meet(&[(parity, true), (not_parity, true)]));
+        assert!(b.meet(&[(parity, true), (x[0], true), (x[23], false)]));
+        let one = b.and(x[0], x[23]);
+        assert!(!b.meet(&[
+            (parity, true),
+            (not_parity, false),
+            (one, true),
+            (x[0], false)
+        ]));
     }
 
     fn guarded(s: &Structured) -> usize {
