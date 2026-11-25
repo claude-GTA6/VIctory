@@ -119,7 +119,6 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
 }
 
 #[cfg(windows)]
-pub(crate) use host::depth_bounds_test;
 
 /// Puts the translation of a container of the title's into the cache on
 /// disk, and with `compute` its host pipeline into the driver's, before any
