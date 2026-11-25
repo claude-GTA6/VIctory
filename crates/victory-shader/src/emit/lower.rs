@@ -5766,14 +5766,17 @@ impl<'a> Lower<'a> {
                 };
                 ((kind | u, 0x409), Some(kind))
             }
-            Fields::Buffer { idxen, format, .. } => {
-                let stride = used.map_or(0, |u| u.stride);
+            // A structured buffer's size through a raw handle too, in bytes,
+            // over its stride below: the host makes structured views raw,
+            // and through a raw view a structured handle's size is its
+            // dwords (shader views) or bytes (unordered views), not its
+            // records (AlanQiang0418 and marquezinii, reviews of upstream
+            // Marvisak/VIctory#1762).
+            Fields::Buffer { .. } => {
                 let props = if un.starts_with("buffer_load_format")
                     || un.starts_with("buffer_store_format")
                 {
                     (10 | u, 0x409)
-                } else if *idxen && format.is_none() && stride >= 4 && stride.is_multiple_of(4) {
-                    (12 | u, stride)
                 } else {
                     (11 | u, 0)
                 };

@@ -97,6 +97,8 @@ mod threading;
 #[cfg(windows)]
 pub mod validator;
 #[cfg(all(test, windows))]
+mod stride_tests;
+#[cfg(all(test, windows))]
 mod valu_tests;
 #[cfg(all(test, windows))]
 mod waterfall_tests;
@@ -458,6 +460,28 @@ pub fn emit(
                 report("local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
+                }
+            }
+        }
+        // `VICTORY_WAVE_WIDE=last`: the wave-wide form only for a program every form above
+        // left at 64 lanes or stopped. A 32-lane host refuses such a program's pipeline
+        // and every dispatch of it is dropped (`sr_tracing:CS_Tiling_Generate_Opaque` and
+        // `GpuParticleUpdate:CS_Visibility` on NVIDIA), so nothing that runs today moves to
+        // the form with barriers in branches, which is what lost the card with
+        // `VICTORY_WAVE_WIDE=1` (programs that had an approximate form moved to it).
+        if std::env::var_os("VICTORY_WAVE_WIDE").is_some_and(|v| v == "last") {
+            let deep = form(ir::without_skips(p, true));
+            let bases = [
+                deep.as_ref().map(|f| &f.0),
+                forms[1].1.as_ref().map(|f| &f.0),
+                forms[0].1.as_ref().map(|f| &f.0),
+                Some(p),
+            ];
+            if let Some(base) = bases.into_iter().flatten().next() {
+                let again = widen(c, native, base, why);
+                report("wave-wide branches (last)", &again);
+                if done(&again) {
+                    return again.map(|(shader, _)| shader);
                 }
             }
         }
