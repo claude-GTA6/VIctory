@@ -1892,6 +1892,24 @@ fn left_null(why: &'static str, unordered: bool, address: u64, len: u64, element
     }
 }
 
+/// Counts and logs (the first, then every 4096th) structured views the host
+/// leaves structured: their bytes do not start on 16 bytes of their copy or
+/// are not whole dwords. Translated shaders read them through raw handles,
+/// which reads the wrong bytes on NVIDIA (marquezinii and rminzao, reviews
+/// of upstream Marvisak/VIctory#1762).
+/// shortcut: such a view needs a copy of its own bytes starting on 16
+/// (upstream's `shadow::for_view` with the raw alignment, as the v2 of
+/// #1762 does); this tree has no per-view copies yet.
+fn left_structured(format: DXGI_FORMAT, stride: u32, offset: u64) {
+    static LEFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if format == DXGI_FORMAT_UNKNOWN && stride > 0 {
+        let n = LEFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n.is_multiple_of(4096) {
+            tracing::warn!(stride, offset, seen = n + 1, "structured buffer view left structured on the host");
+        }
+    }
+}
+
 fn buffer_srv(
     address: u64,
     len: u64,
@@ -1919,6 +1937,7 @@ fn buffer_srv(
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { &mut desc.Anonymous.Buffer };
     if window.is_none() {
+        left_structured(desc.Format, buffer.StructureByteStride, offset);
         if element == 0 || offset % element != 0 {
             left_null("not on an element of their host copy", false, address, len, element, buffer.FirstElement);
             return None;
@@ -1997,6 +2016,7 @@ fn buffer_uav(
         buffer.StructureByteStride = 0;
         buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
     } else {
+        left_structured(desc.Format, buffer.StructureByteStride, offset);
         if element == 0 || offset % element != 0 {
             left_null("not on an element of their host copy", true, address, len, element, buffer.FirstElement);
             return None;
