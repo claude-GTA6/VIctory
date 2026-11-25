@@ -177,6 +177,26 @@ pub(super) fn key_code(name: &str) -> Option<u8> {
     })
 }
 
+/// The key a US keyboard has at the place of scan code `scan` (letters,
+/// digits and punctuation; `None` for keys that sit at the same place on
+/// every layout, which keep their virtual key). Bindings name keys by that
+/// place, so the hand position is the same on every layout: the keys of
+/// W A S D are Z Q S D on an AZERTY keyboard.
+pub(super) fn us_key(scan: u32) -> Option<u8> {
+    // Rows of a US keyboard from their first scan code: digits to `=`,
+    // Q to `]`, A to the grave accent, `\` to `/`.
+    const ROWS: [(u32, &[u8]); 4] = [
+        (0x02, &[b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', 0xBD, 0xBB]),
+        (0x10, &[b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I', b'O', b'P', 0xDB, 0xDD]),
+        (0x1E, &[b'A', b'S', b'D', b'F', b'G', b'H', b'J', b'K', b'L', 0xBA, 0xDE, 0xC0]),
+        (0x2B, &[0xDC, b'Z', b'X', b'C', b'V', b'B', b'N', b'M', 0xBC, 0xBE, 0xBF]),
+    ];
+    ROWS.iter().find_map(|&(first, keys)| {
+        let at = scan.checked_sub(first)?;
+        keys.get(at as usize).copied()
+    })
+}
+
 /// A key's name, for messages.
 pub(super) fn key_name(vk: u8) -> String {
     if vk.is_ascii_uppercase() || vk.is_ascii_digit() {
@@ -317,6 +337,9 @@ pub(super) struct Settings {
     pub deadzone: f32,
     pub curve: f32,
     pub walk_speed: f32,
+    /// Letters, digits and punctuation are the keys at those places on a
+    /// US keyboard ([`us_key`]), whatever the layout prints on them.
+    pub by_position: bool,
     pub on_foot: Layout,
     pub vehicle: Layout,
 }
@@ -333,6 +356,7 @@ impl Default for Settings {
             deadzone: 0.0,
             curve: 1.0,
             walk_speed: 0.5,
+            by_position: true,
             on_foot: Layout::of(ON_FOOT),
             vehicle: Layout::of(VEHICLE),
         }
@@ -358,6 +382,7 @@ struct File {
     stick_deadzone: Option<f32>,
     stick_curve: Option<f32>,
     walk_speed: Option<f32>,
+    keys_by_position: Option<bool>,
     #[serde(default)]
     on_foot: BTreeMap<String, Binding>,
     #[serde(default)]
@@ -391,6 +416,7 @@ impl Settings {
         s.invert_y = file.mouse_invert_y.unwrap_or(s.invert_y);
         s.capture = file.mouse_capture.unwrap_or(s.capture);
         s.carry = file.mouse_carry.unwrap_or(s.carry);
+        s.by_position = file.keys_by_position.unwrap_or(s.by_position);
         for (layout, binds, name) in [
             (&mut s.on_foot, &file.on_foot, "on_foot"),
             (&mut s.vehicle, &file.vehicle, "vehicle"),
@@ -843,6 +869,33 @@ mod tests {
         assert_eq!(key_name(0x70), "F1");
         assert_eq!(key_name(0xA0), "LShift");
         assert_eq!(key_name(b'Q'), "Q");
+    }
+
+    #[test]
+    fn letters_are_named_by_their_place_on_a_us_keyboard() {
+        for (scan, key) in [
+            (0x11, b'W'),
+            (0x1E, b'A'),
+            (0x1F, b'S'),
+            (0x20, b'D'),
+            (0x10, b'Q'),
+            (0x2C, b'Z'),
+            (0x32, b'M'),
+            (0x02, b'1'),
+            (0x0B, b'0'),
+            (0x29, 0xC0),
+            (0x2B, 0xDC),
+            (0x35, 0xBF),
+        ] {
+            assert_eq!(us_key(scan), Some(key), "{scan:#x}");
+        }
+        // Esc, Tab, Enter, Left Ctrl, Space, Left Shift, the extended keys.
+        for scan in [0x01, 0x0F, 0x1C, 0x1D, 0x39, 0x2A, 0xE035, 0xE048] {
+            assert_eq!(us_key(scan), None, "{scan:#x}");
+        }
+        let off: toml::Table = toml::from_str("keys_by_position = false").unwrap();
+        assert!(Settings::default().by_position);
+        assert!(!Settings::parse(&off).unwrap().by_position);
     }
 
     #[test]

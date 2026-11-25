@@ -501,9 +501,15 @@ impl State {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
         if let Some(c) = &mut self.controls {
+            let by_position = c.s.by_position;
             let held: Vec<u8> = keys
                 .iter()
-                .map(|k| k.virtual_key)
+                .map(|k| {
+                    by_position
+                        .then(|| super::controls::us_key(k.scan_code))
+                        .flatten()
+                        .unwrap_or(k.virtual_key)
+                })
                 .chain(mouse_buttons.iter().copied())
                 .collect();
             c.feed(&held, counts);
@@ -2069,6 +2075,32 @@ mod tests {
         let r = current(hub, KEYBOARD_KIND, KEYBOARD).unwrap();
         let count = slot::<extern "system" fn(*const Reading) -> u32, _>(r, 0x70);
         assert_eq!(count(r), 2);
+        release(r);
+    }
+
+    /// An AZERTY keyboard: the key at the US W place types Z. It moves the
+    /// stick as W does (by its place), and as nothing when keys go by letter.
+    #[test]
+    fn keys_go_by_their_place_whatever_the_layout_prints() {
+        let azerty_z = KeyState {
+            scan_code: 0x11,
+            virtual_key: b'Z',
+            ..Default::default()
+        };
+        let (hub, host) = fake_kbm();
+        host.lock().unwrap().keys = vec![azerty_z];
+        hub.poll();
+        let r = current(hub, GAMEPAD_KIND, FALLBACK).unwrap();
+        assert_eq!(pad(r).left_y, 1.0, "the W place walks forward");
+        release(r);
+        let (hub, host) = fake_with(super::super::controls::Settings {
+            by_position: false,
+            ..Default::default()
+        });
+        host.lock().unwrap().keys = vec![azerty_z];
+        hub.poll();
+        let r = current(hub, GAMEPAD_KIND, FALLBACK).unwrap();
+        assert_eq!(pad(r).left_y, 0.0, "by letter, Z is not bound");
         release(r);
     }
 
