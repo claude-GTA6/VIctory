@@ -30,6 +30,8 @@ test_titles = []
 # stick_deadzone = 0.0     # the title's stick dead zone, skipped over
 # stick_curve = 1.0        # the title's stick response exponent, undone
 # walk_speed = 0.5         # left stick while the walk key is held
+# keys_by_position = true  # letters = the keys at those places on a US keyboard
+#                          # (W A S D are Z Q S D on AZERTY); false: by letter
 
 # Rebind keys; a table replaces only the keys it names. A value is a pad
 # output (A B X Y LB RB LT RT LS RS View Menu DpadUp DpadDown DpadLeft

@@ -206,6 +206,8 @@ and held in it; Alt-Tab or Esc frees it, a click or Esc captures it again.
 | Tab, V or M, wheel | LB, View, D-pad left / right | | |
 | arrows, Enter, Backspace, Esc or P | D-pad, A, B, Menu | | |
 
+The letters are the keys at those places on a US keyboard, so the left stick
+is Z Q S D on an AZERTY keyboard (`keys_by_position = false`: by letter).
 F (enter a vehicle) also switches to the vehicle layout and back; G switches
 it alone when it is out of step. Rebind everything in `[controls]` of
 `victory.toml` (see `victory.example.toml`); `enabled = false` brings back the
