@@ -118,8 +118,6 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
         .clone()
 }
 
-#[cfg(windows)]
-
 /// Puts the translation of a container of the title's into the cache on
 /// disk, and with `compute` its host pipeline into the driver's, before any
 /// run wants them. Whether it translated, and whether it has a pipeline
