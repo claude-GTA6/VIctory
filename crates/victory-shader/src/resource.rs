@@ -1340,11 +1340,84 @@ impl<'a> Tracer<'a> {
                     Ok(source) if self.anywhere(&source) => Ok(source),
                     _ => Err(e),
                 },
-                None => Err(e),
+                None => self.past_undefined(block, &edge, joins, known).ok_or(e),
             },
         };
         joins.pop();
         source.map(Some)
+    }
+
+    /// The one source of a join whose other edges hold no descriptor
+    /// because they leave its registers undefined: every word there is a
+    /// lane mask, or the entry value of an SGPR that holds no root
+    /// parameter. The console compiler sets a descriptor up inside a branch
+    /// taken when some lane needs it and reuses the registers on the other
+    /// path; where the lanes' paths cannot rule that path out
+    /// ([`Self::only_edge`]: a program with its skips left out, say), what
+    /// the registers hold there is still no descriptor, so an access after
+    /// the join that reads one came by an edge that brings it. Taken when
+    /// those edges agree and lowering can make the source anywhere.
+    // shortcut: a lane that used the undefined registers would read garbage
+    // on the console too; taken as a path no lane that needs the result runs.
+    fn past_undefined(
+        &self,
+        block: usize,
+        edge: &dyn Fn(usize) -> Vec<Term>,
+        joins: &mut Vec<usize>,
+        known: &mut Known,
+    ) -> Option<Source> {
+        let mut found: Option<Source> = None;
+        for j in 0..self.p.blocks[block].preds.len() {
+            let words = edge(j);
+            match self.classify(&words, joins, known) {
+                Ok(s) if found.as_ref().is_none_or(|f| *f == s) => found = Some(s),
+                Ok(_) => return None,
+                Err(_) if words.iter().all(|&w| self.undefined_word(w)) => {}
+                Err(_) => return None,
+            }
+        }
+        found.filter(|s| self.anywhere(s))
+    }
+
+    /// A dword no descriptor comes from: a lane mask, or the entry value of
+    /// an SGPR that holds no root parameter.
+    fn undefined_word(&self, w: Term) -> bool {
+        let Term::Value(v) = w else { return false };
+        match self.inputs[v.0 as usize] {
+            Some(reg) => self.param_of(reg).is_none(),
+            None => self.lane_mask(v, 0),
+        }
+    }
+
+    /// `v` is a lane mask: a compare's result, a saved EXEC, or a bitwise
+    /// operation of masks, EXEC and VCC.
+    fn lane_mask(&self, v: Value, depth: u32) -> bool {
+        const LOGIC: [&str; 9] = [
+            "s_and_", "s_or_", "s_xor_", "s_andn2_", "s_orn2_", "s_nand_", "s_nor_", "s_xnor_",
+            "s_not_",
+        ];
+        let Some(inst) = self.def(v) else {
+            return false;
+        };
+        let name = inst.name();
+        if name.starts_with("v_cmp") || name.contains("_saveexec_") {
+            return true;
+        }
+        if depth > 8 || !LOGIC.iter().any(|p| name.starts_with(p)) {
+            return false;
+        }
+        let Fields::Sop { src, .. } = &inst.fields else {
+            return false;
+        };
+        let k = inst.writes.iter().position(|w| w.1 == v).unwrap_or(0) as u8;
+        src.iter().all(|op| match *op {
+            Operand::Scalar { code, .. } if code == EXEC || code == crate::ir::VCC => true,
+            Operand::Scalar { code, .. } => inst.read(Reg::S(code + k)).is_some_and(
+                |x| matches!(self.origin(x), Term::Value(y) if self.lane_mask(y, depth + 1)),
+            ),
+            Operand::Const(c) => matches!(inline(c), Some(0 | u32::MAX)),
+            _ => false,
+        })
     }
 
     /// Words that `s_cselect` (or `s_cmov`) picks by one SCC value, traced
@@ -3844,5 +3917,46 @@ pub(crate) mod tests {
         assert_eq!(table_offset(&r, other), 0x20);
         assert_eq!(r.waterfall.compares.len(), 2);
         assert_eq!(r.waterfall.reads.len(), 4);
+    }
+
+    /// A branch loads a table descriptor that an access after the join
+    /// reads; on the other edge its registers hold entry values of SGPRs
+    /// that carry no root parameter. Traced without the lanes' paths, so
+    /// that [`Tracer::only_edge`] has nothing to go by (as for a program
+    /// with its skips left out).
+    const LOADED_IN_A_BRANCH: [u32; 8] = [
+        0xBE85_0380, // s_mov_b32 s5, 0
+        0xBF06_8000, // s_cmp_eq_u32 s0, 0
+        0xBF85_0002, // s_cbranch_scc1 +2
+        0xF408_0202,
+        0xFA00_0040, // s_load_dwordx4 s[8:11], s[4:5], 0x40
+        0xF420_0404,
+        0xFA00_0000, // s_buffer_load_dword s16, s[8:11], null
+        S_ENDPGM,
+    ];
+
+    fn track_without_lanes(layout: &[RootParam]) -> Result<Resources, ShaderError> {
+        let code: Vec<u8> = LOADED_IN_A_BRANCH.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = crate::ir::build(&code, false, 256).unwrap();
+        track(&p, layout, HwStage::Cs, None)
+    }
+
+    #[test]
+    fn a_descriptor_loaded_in_a_branch_ignores_the_undefined_edge() {
+        let r = track_without_lanes(&[param(Table, 4, 1)]).unwrap();
+        assert_eq!(
+            r.descriptors[0].source,
+            Source::Loaded {
+                load: (1, 0),
+                first: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_root_parameter_on_the_other_edge_is_no_undefined_edge() {
+        // s8 and s9 hold a root descriptor's address on entry: the other
+        // edge brings words that may be one, so the join stays refused.
+        assert!(track_without_lanes(&[param(Table, 4, 1), param(Descriptor, 8, 2)]).is_err());
     }
 }
