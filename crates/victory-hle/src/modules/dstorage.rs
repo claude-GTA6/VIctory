@@ -982,7 +982,7 @@ fn read_into(request: &Request, out: &mut [u8]) -> Result<(), HRESULT> {
 fn into_destination(
     request: &Request,
     len: usize,
-    fill: impl FnOnce(&mut [u8]) -> Result<usize, HRESULT>,
+    mut fill: impl FnMut(&mut [u8]) -> Result<usize, HRESULT>,
 ) -> Result<(), HRESULT> {
     if request.options & PAGE_DESTINATION == 0 {
         // Raw reads land through the kernel, which does not fault into the
@@ -991,7 +991,28 @@ fn into_destination(
         // SAFETY: the title's destination holds `destination_size` bytes, at
         // least `len`, and nothing else writes it until completion.
         let out = unsafe { std::slice::from_raw_parts_mut(request.destination.cast::<u8>(), len) };
-        return fill(out).map(drop);
+        return match fill(out) {
+            // The kernel refused the destination (ERROR_INVALID_USER_BUFFER, ERROR_NOACCESS):
+            // a page of it was guarded again between the opening above and the read (another
+            // view of the page was protected meanwhile), and a kernel write does not fault
+            // into the guard. The title traps on the data it then finds missing, so the bytes
+            // are read into a buffer of ours and copied in from user mode, which the guard sees.
+            Err(hr) if matches!(hr as u32, 0x8007_06f8 | 0x8007_03e6) => {
+                let mut data = vec![0; len];
+                let n = fill(&mut data)?.min(len);
+                victory_gpu::kernel_will_write(request.destination as usize, len);
+                // SAFETY: as above; `n` bytes of ours into the title's `len`.
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), request.destination.cast::<u8>(), n) };
+                tracing::info!(
+                    offset = request.offset,
+                    len,
+                    hr = format_args!("{:#010x}", hr as u32),
+                    "dstorage: a raw read the kernel could not land in a guarded destination was copied in"
+                );
+                Ok(())
+            }
+            other => other.map(drop),
+        };
     }
     let offset = (request.page_offset & 0xffff) as usize;
     let pages = &filled(request.destination.cast(), (offset + len).div_ceil(PAGE))[..];
